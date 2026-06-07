@@ -1,0 +1,131 @@
+@import "tailwindcss";
+
+@theme {
+  /* --- Custom Industrial Command Color Palette --- */
+  --color-primary: #5af0b3;
+  --color-primary-container: #34d399;
+  --color-primary-fixed: #68fcbf;
+  --color-primary-fixed-dim: #45dfa4;
+  --color-on-primary: #003825;
+  --color-on-primary-container: #00563b;
+  --color-on-primary-fixed: #002114;
+  --color-on-primary-fixed-variant: #005137;
+  
+  --color-secondary: #5de6ff;
+  --color-secondary-container: #00cbe6;
+  --color-secondary-fixed: #a2eeff;
+  --color-secondary-fixed-dim: #2fd9f4;
+  --color-on-secondary: #00363e;
+  --color-on-secondary-container: #00515d;
+  --color-on-secondary-fixed: #001f25;
+  --color-on-secondary-fixed-variant: #004e5a;
+  
+  --color-tertiary: #ffc9cc;
+  --color-tertiary-container: #ffa1a7;
+  --color-tertiary-fixed: #ffdadb;
+  --color-tertiary-fixed-dim: #ffb2b7;
+  --color-on-tertiary: #67001b;
+  --color-on-tertiary-container: #99002c;
+  --color-on-tertiary-fixed: #40000d;
+  --color-on-tertiary-fixed-variant: #92002a;
+  
+  --color-background: #0c1324;
+  --color-on-background: #dce1fb;
+  --color-surface: #0c1324;
+  --color-on-surface: #dce1fb;
+  --color-surface-variant: #2e3447;
+  --color-on-surface-variant: #bbcac0;
+  
+  --color-surface-container-lowest: #070d1f;
+  --color-surface-container-low: #151b2d;
+  --color-surface-container: #191f31;
+  --color-surface-container-high: #23293c;
+  --color-surface-container-highest: #2e3447;
+  --color-surface-bright: #33394c;
+  --color-surface-dim: #0c1324;
+  --color-surface-tint: #45dfa4;
+  
+  --color-inverse-surface: #dce1fb;
+  --color-inverse-on-surface: #2a3043;
+  --color-inverse-primary: #006c4b;
+  
+  --color-error: #ffb4ab;
+  --color-on-error: #690005;
+  --color-error-container: #93000a;
+  --color-on-error-container: #ffdad6;
+  
+  --color-outline: #85948b;
+  --color-outline-variant: #3c4a42;
+
+  /* --- Spacing Layout Definitions --- */
+  --spacing-gutter: 24px;
+  --spacing-margin-edge: 32px;
+  --spacing-bento-gap: 16px;
+  --spacing-unit: 4px;
+
+  /* --- Font Structural Assignments --- */
+  --font-headline-xl: "Geist", sans-serif;
+  --font-headline-lg: "Geist", sans-serif;
+  --font-body-md: "Geist", sans-serif;
+  --font-data-lg: "JetBrains Mono", monospace;
+  --font-data-md: "JetBrains Mono", monospace;
+  --font-label-caps: "JetBrains Mono", monospace;
+}
+
+/* --- Base Layout Context --- */
+@layer base {
+  body {
+    background: radial-gradient(circle at 50% -20%, #151b2d 0%, #0c1324 100%);
+    color: #dce1fb;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+}
+
+/* --- Project Interface Component Classes --- */
+@utility glass-card {
+  background: rgba(21, 27, 45, 0.6);
+  backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  
+  &:hover {
+    backdrop-filter: blur(40px);
+    background: rgba(21, 27, 45, 0.4);
+    border-color: rgba(90, 240, 179, 0.3);
+    transform: scale(1.02);
+    box-shadow: 0 0 20px rgba(90, 240, 179, 0.1);
+  }
+}
+
+@utility scan-line {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent 50%, rgba(255, 255, 255, 0.03) 50%);
+  background-size: 100% 4px;
+  pointer-events: none;
+  z-index: 10;
+}
+
+@utility glow-pulse {
+  animation: glow 2s infinite alternate;
+}
+
+@utility terminal-input {
+  border-bottom: 2px solid #2e3447;
+  transition: border-color 0.3s ease;
+  
+  &:focus {
+    outline: none;
+    border-bottom-color: #5de6ff;
+  }
+}
+
+@keyframes glow {
+  from { box-shadow: 0 0 4px rgba(93, 230, 255, 0.4); }
+  to { box-shadow: 0 0 12px rgba(93, 230, 255, 0.8); }
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}

@@ -1,0 +1,56 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background: radial-gradient(circle at 50% -20%, #151b2d 0%, #0c1324 100%);
+    color: #dce1fb;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+}
+
+@layer components {
+  .glass-card {
+    background: rgba(21, 27, 45, 0.6);
+    backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .glass-card:hover {
+    backdrop-filter: blur(40px);
+    background: rgba(21, 27, 45, 0.4);
+    border-color: rgba(90, 240, 179, 0.3);
+    transform: scale(1.02);
+    box-shadow: 0 0 20px rgba(90, 240, 179, 0.1);
+  }
+  .scan-line {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(to bottom, transparent 50%, rgba(255, 255, 255, 0.03) 50%);
+    background-size: 100% 4px;
+    pointer-events: none;
+    z-index: 10;
+  }
+  .glow-pulse {
+    animation: glow 2s infinite alternate;
+  }
+  .terminal-input {
+    border-bottom: 2px solid #2e3447;
+    transition: border-color 0.3s ease;
+  }
+  .terminal-input:focus {
+    outline: none;
+    border-bottom-color: #5de6ff;
+  }
+}
+
+@keyframes glow {
+  from { box-shadow: 0 0 4px rgba(93, 230, 255, 0.4); }
+  to { box-shadow: 0 0 12px rgba(93, 230, 255, 0.8); }
+}
+
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
