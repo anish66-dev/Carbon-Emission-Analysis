@@ -52,6 +52,14 @@ def login_user(payload: UserLogin, db: Database = Depends(get_db)):
     password_match = bcrypt.checkpw(payload.password.encode('utf-8'), user["password_hash"].encode('utf-8'))
     if not password_match:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid email or password credentials")
+    # [Your existing code: user lookup and password_match verification check goes here]
+    
+    # CRITICAL SECURITY GATEGUARD: Stop inactive accounts from generating tokens
+    if not user.get("is_active", True): # Defaults to True if field doesn't exist yet
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="Your account has been deactivated. Please contact your system administrator."
+        )
     
     access_token = create_access_token(
         data={
@@ -198,13 +206,37 @@ def get_dashboard_analytics(tenant_id: str, db: Database = Depends(get_db), curr
 
 # --- AI RECOMMANDATION SYSTEM ---
 @app.get("/api/v1/advisor/recommendations", tags=["AI Recommendation System"])
-def get_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
+def get_stored_recommendations(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
+    if tenant_id != str(current_user["tenant_id"]):
+        raise HTTPException(status_code=403, detail="Unauthorized dataset view request.")
+    
+    stored_tasks = list(db.ai_recommendations.find({"tenant_id": tenant_id, "status": {"$ne": "Completed"}}))
+    for rec in stored_tasks:
+        if "_id" in rec:
+            del rec["_id"]
+    return {"tenant_id": tenant_id, "recommendations": stored_tasks}
+
+@app.post("/api/v1/advisor/recommendations/generate", tags=["AI Recommendation System"])
+def generate_new_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
     """
     Reads active carbon logs, filters out already completed database tasks,
     calls GROQ to generate custom operational fixes, and SAVES them to the DB.
     """
     if tenant_id != str(current_user["tenant_id"]):
         raise HTTPException(status_code=403, detail="Unauthorized dataset view request.")
+
+    MAX_ACTIVE_RECORDS = 10
+    active_count = db.ai_recommendations.count_documents({
+        "tenant_id": tenant_id,
+        "status": {"$ne": "Completed"}
+    })
+
+    if active_count >= MAX_ACTIVE_RECORDS:
+        # Throwing a 400 Bad Request with your specific explicit workflow guidance message
+        raise HTTPException(
+            status_code=400, 
+            detail="You have hit your active task limit. Please complete the given tasks before generating more."
+        )
 
     # 1. Fetch company records to build the AI's context
     tenant = db.tenants.find_one({"_id": tenant_id})
@@ -223,13 +255,14 @@ def get_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), curre
     # Adjusted keys to match exactly what Dashboard.jsx needs (category, description, status)
     # Changed output structure to a JSON object containing a list, required for 'json_object' mode.
     system_instruction = (
-        f"You are an expert energy auditor specializing in MSME sustainability for the {tenant.get('industry_sector', 'commercial')} sector. "
-        f"The company has a lifetime carbon footprint of {total_tons} metric tons of CO2e. "
-        f"CRITICAL: Do NOT suggest any of the following projects as they have already been fully implemented: {completed_titles}. "
-        "Provide exactly 2 new, low-cost operational recommendations. "
-        "You MUST respond ONLY with a raw JSON object containing a 'recommendations' array. "
-        "Match this exact structure: "
-        '{"recommendations": [{"task_key": "unique_slug_123", "category": "Energy Efficiency", "status": "To-Do", "title": "Actionable Title", "description": "Detailed explanation of the action."}]}'
+        f"You are an energy auditor for the {tenant.get('industry_sector')} sector. "
+        f"The company has a lifetime footprint of {total_tons} tons of CO2e. "
+        f"Do NOT suggest these already implemented projects: {completed_titles}. "
+        "Provide exactly 2 new operational recommendations. Return ONLY a raw JSON object with a 'recommendations' array. "
+        "You MUST include metrics for monthly savings (INR), carbon reduction percentage, and upfront cost (INR). "
+        "Match this exact JSON structure: "
+        '{"recommendations": [{"task_key": "slug_123", "category": "Efficiency", "status": "To-Do", "title": "Title", "description": "Desc.", '
+        '"estimated_monthly_savings": 4500, "estimated_carbon_reduction_pct": 4.5, "estimated_upfront_cost": 12000}]} The numbers are examples calculate accordingly and assign them.'
     )
 
     headers = {
@@ -266,19 +299,24 @@ def get_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), curre
         # --- FIX 3: INJECT TENANT ID AND SAVE TO DATABASE ---
         # This ensures the PATCH endpoint can actually find the tasks!
         if new_recommendations:
-            for rec in new_recommendations:
-                rec["tenant_id"] = tenant_id
-            
-            db.ai_recommendations.insert_many(new_recommendations)
+            # 1. Enforce a strict safety ceiling (e.g., maximum 15 total tasks stored per company)
 
-        # Remove the MongoDB '_id' object before sending to frontend
-        for rec in new_recommendations:
-            if "_id" in rec:
-                del rec["_id"]
+            valid_inserts = []
+            for rec in new_recommendations:
+                # Check if this specific task slug or title already exists in the system
+                exists = db.ai_recommendations.find_one({
+                    "tenant_id": tenant_id, 
+                    "task_key": rec["task_key"]
+                })
+                if not exists:
+                    rec["tenant_id"] = tenant_id
+                    valid_inserts.append(rec)
+            
+            if valid_inserts:
+                db.ai_recommendations.insert_many(valid_inserts)
 
         # Return the clean, mapped JSON to the frontend
-        return {"tenant_id": tenant_id, "recommendations": new_recommendations}
-        
+        return {"message": "New optimization recommendations generated successfully."}
     except json.JSONDecodeError:
          raise HTTPException(status_code=500, detail="Failed to parse AI response into valid JSON.")
     except Exception as e:
@@ -501,3 +539,90 @@ def simulate_reduction(tenant_id: str, target_month: str, reduction_pct: float, 
         "net_carbon_saved_tons": round(simulated_savings, 4),
         "reduction_applied": f"{reduction_pct}%"
     }
+
+# 1. READ ALL USERS (Admin Only)
+@app.get("/api/v1/admin/users", tags=["User Management"])
+def get_all_users(db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin"]))):
+    # Fetch all users for this specific company tenant
+    users = list(db.users.find({"tenant_id": current_user["tenant_id"], "email": {"$ne": current_user["email"]}}))
+    for u in users:
+        if "_id" in u:
+            u["_id"] = str(u["_id"])
+        if "password_hash" in u:
+            del u["password_hash"] # Security safeguard: never leak hashes to frontend
+    return users
+
+# 2. UPDATE USER STATUS TOGGLE (Admin Only)
+@app.patch("/api/v1/admin/users/{user_email}/status", tags=["User Management"])
+def toggle_user_active_status(user_email: str, payload: dict, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin"]))):
+    new_status = payload.get("is_active", True)
+    
+    result = db.users.update_one(
+        {"email": user_email.lower(), "tenant_id": current_user["tenant_id"]},
+        {"$set": {"is_active": new_status}}
+    )
+    
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Target user workspace node not found.")
+        
+    return {"message": f"User {user_email} status updated to {'Active' if new_status else 'Inactive'}."}
+
+@app.post("/api/v1/admin/users", status_code=status.HTTP_201_CREATED, tags=["User Management"])
+def admin_create_user(payload: dict, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin"]))):
+    """
+    Validates user constraints, salt-hashes incoming password parameters,
+    and inserts a new active identity document attached to the admin's tenant.
+    """
+    email_clean = payload.get("email", "").lower().strip()
+    name_raw = payload.get("name", "").strip()
+    password_raw = payload.get("password", "")
+    role_target = payload.get("role", "Staff")
+
+    if not email_clean or not password_raw or not name_raw:
+        raise HTTPException(status_code=400, detail="Missing required deployment identity fields.")
+
+    # 1. Collision Check: Ensure the email isn't already claimed
+    existing_user = db.users.find_one({"email": email_clean})
+    if existing_user:
+        raise HTTPException(status_code=400, detail="An operator account with this email anchor already exists.")
+
+    # 2. Encrypt the incoming credentials string safely using bcrypt
+    salt = bcrypt.gensalt()
+    hashed_password = bcrypt.hashpw(password_raw.encode('utf-8'), salt).decode('utf-8')
+
+    # 3. Assemble the structural document layer
+    new_user_document = {
+        "name": name_raw,
+        "email": email_clean,
+        "password_hash": hashed_password,
+        "role": role_target,
+        "tenant_id": current_user["tenant_id"],  # Forced server-side to guarantee cross-tenant isolation
+        "is_active": True                        # Automatically provisioned as active
+    }
+
+    db.users.insert_one(new_user_document)
+    
+    return {"status": "Success", "message": f"Account profile channels for {name_raw} securely created."}
+
+# 3. DELETE USER ACCOUNT PROFILE (Admin Only)
+@app.delete("/api/v1/admin/users/{user_email}", tags=["User Management"])
+def admin_delete_user(user_email: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin"]))):
+    """
+    Locates target user identity inside the tenant boundary pool
+    and safely removes it permanently from the system database.
+    """
+    email_clean = user_email.lower().strip()
+
+    # Self-deletion guard: Prevent admins from locking themselves out
+    if email_clean == current_user["email"].lower():
+        raise HTTPException(status_code=400, detail="Administrative self-eviction blocked. You cannot delete your own active root account.")
+
+    result = db.users.delete_one({
+        "email": email_clean,
+        "tenant_id": current_user["tenant_id"] # Critical cross-tenant boundary isolation check
+    })
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Target user profile could not be found within your network pool.")
+
+    return {"status": "Success", "message": f"User account {email_clean} wiped from organizational core database structures."}

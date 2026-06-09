@@ -13,10 +13,27 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
   const [isLoading, setIsLoading] = useState(true);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadStatus, setUploadStatus] = useState("READY_FOR_UPLOAD");
+  const [sortMetric, setSortMetric] = useState('savings'); // 'savings', 'reduction', 'cost'
+  const [sortDirection, setSortDirection] = useState('desc'); // 'asc', 'desc'
 
   // User details from localStorage / context
   const userRole = localStorage.getItem('user_role') || 'Staff'; // Admin, Staff, Auditor
   const tenantId = localStorage.getItem('tenant_id');
+
+  const [isMetricDropdownOpen, setIsMetricDropdownOpen] = useState(false);
+  const [isDirDropdownOpen, setIsDirDropdownOpen] = useState(false);
+  const metricLabels = {
+    savings: 'Monthly Savings',
+    reduction: 'Carbon Reduction',
+    cost: 'Upfront Cost'
+  };
+  const dirLabels = {
+    asc: 'Ascending ↑',
+    desc: 'Descending ↓'
+  };
+
+
+  const [isGeneratingAI, setIsGeneratingAI] = useState(false);
 
   const [dashboardData, setDashboardData] = useState({
     company_name: "Loading...",
@@ -156,6 +173,22 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
     }
   };
 
+  // AI generation
+  const handleGenerateRecommendations = async () => {
+    setIsGeneratingAI(true);
+    try {
+      await axios.post(`http://127.0.0.1:8000/api/v1/advisor/recommendations/generate?tenant_id=${tenantId}`, {}, getAuthHeaders());
+      const aiRes = await axios.get(`http://127.0.0.1:8000/api/v1/advisor/recommendations?tenant_id=${tenantId}`, getAuthHeaders());
+      setRecommendations(aiRes.data.recommendations || []);
+    } catch (err) {
+      // Captures the precise string message sent up from your backend error exceptions
+      const errMsg = err.response?.data?.detail || "Neural Engine failure.";
+      alert(errMsg);
+    } finally {
+      setIsGeneratingAI(false);
+    }
+  };
+
   // Run Scenario Simulation
   const handleRunSimulation = async (e) => {
     e.preventDefault();
@@ -177,10 +210,12 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
         { status: newStatus },
         getAuthHeaders()
       );
-      fetchAllData();
     } catch (error) {
-      console.error("Failed to update task:", error);
+      console.error("Failed to update task on server:", error);
+      alert("System sync dropped. Reverting card status.");
     }
+    const aiRes = await axios.get(`http://127.0.0.1:8000/api/v1/advisor/recommendations?tenant_id=${tenantId}`, getAuthHeaders());
+    setRecommendations(aiRes.data.recommendations || []);
   };
 
   // Delete Log Action (Staff & Admin Only)
@@ -194,13 +229,85 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
     fetchAllData();
   };
 
-  // Admin Account Creation Setup
-  const handleCreateAccount = (e) => {
-    e.preventDefault();
-    alert(`Success! Created deployment profile node for user: ${newUser.name} with security scope: [${newUser.role}]`);
-    setNewUser({ name: '', email: '', password: '', role: 'Staff' });
+  const [userList, setUserList] = useState([]);
+  const [activeStatusDropdown, setActiveStatusDropdown] = useState(null); // Tracks open dropdown row index
+
+  const fetchUsers = async () => {
+    try {
+      const res = await axios.get("http://127.0.0.1:8000/api/v1/admin/users", getAuthHeaders());
+      setUserList(res.data || []);
+    } catch (err) {
+      console.error("Failed to read user directories:", err.message);
+    }
   };
 
+  // Fire this fetch automatically when the user clicks onto the admin panel
+  useEffect(() => {
+    if (activeTab === 'admin' && userRole === 'Admin') {
+      fetchUsers();
+    }
+  }, [activeTab]);
+
+  // Admin Account Creation Setup
+  const handleCreateAccount = async (e) => {
+    e.preventDefault();
+
+    try {
+      const res = await axios.post(
+        "http://127.0.0.1:8000/api/v1/admin/users",
+        {
+          name: newUser.name,
+          email: newUser.email,
+          password: newUser.password,
+          role: newUser.role
+        },
+        getAuthHeaders()
+      );
+
+      alert(res.data.message || "Account provisioned successfully.");
+
+      // Reset state parameters clean
+      setNewUser({ name: '', email: '', password: '', role: 'Staff' });
+
+      // Re-trigger the directory list sync to immediately show the new user row
+      fetchUsers();
+
+    } catch (err) {
+      const errorFeedback = err.response?.data?.detail || "Identity routing processing failure.";
+      alert(errorFeedback);
+    }
+  };
+
+  const handleDeleteUser = async (userEmail) => {
+  const confirmUserWipe = window.confirm(`CRITICAL SYSTEM ACTION: Are you sure you want to permanently delete user [ ${userEmail} ]?\nThis action cannot be undone.`);
+  if (!confirmUserWipe) return;
+
+  try {
+    const res = await axios.delete(`http://127.0.0.1:8000/api/v1/admin/users/${userEmail}`, getAuthHeaders());
+    alert(res.data.message || "User successfully evicted from active directory.");
+    
+    // Refresh the user roster grid immediately to mirror deletion changes
+    fetchUsers();
+  } catch (err) {
+    const errorMsg = err.response?.data?.detail || "Eviction routine failed.";
+    alert(errorMsg);
+  }
+};
+
+  const handleToggleUserStatus = async (userEmail, currentStatus) => {
+    const nextStatus = !currentStatus;
+
+    // Optimistic local UI State transition
+    setUserList(prev => prev.map(u => u.email === userEmail ? { ...u, is_active: nextStatus } : u));
+    setActiveStatusDropdown(null);
+
+    try {
+      await axios.patch(`http://127.0.0.1:8000/api/v1/admin/users/${userEmail}/status`, { is_active: nextStatus }, getAuthHeaders());
+    } catch (err) {
+      alert("Failed to modify target security baseline status node.");
+      fetchUsers(); // Rollback to actual server data on error
+    }
+  };
   const executeTerminalShutdown = () => {
     onLogout();
     navigate('/');
@@ -253,7 +360,7 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
       </header>
 
       {/* Main Core Viewport Switcher */}
-      <main className="relative z-10 px-8 pt-8 max-w-[1600px] mx-auto pb-32">
+      <main className="relative z-10 px-8 pt-0 max-w-[1600px] mx-auto pb-32">
 
         {/* TAB MATRIX OVERVIEW CONTENT */}
         {activeTab === 'overview' && (
@@ -439,41 +546,146 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
         )}
 
         {/* TAB CONTROL SEPARATE AI RECOMMENDATION MATRIX */}
-        {activeTab === 'matrix' && userRole !== 'Auditor' &&(
+        {activeTab === 'matrix' && userRole !== 'Auditor' && (
           <div className="space-y-6">
-            <div className="flex items-center justify-between border-b border-white/10 pb-4">
+            {/* UPDATED HEADER: Changed gap-4 to gap-2, and reduced pb-4 to pb-2 to pull everything closer */}
+            <div className="flex flex-col md:flex-row items-center justify-between gap-4 border-b border-white/10 py-3">
+
+              {/* Left text cluster stays aligned */}
               <div>
                 <h2 className="text-xl text-white font-bold flex items-center gap-2">
                   <span className="material-symbols-outlined text-purple-400">auto_awesome</span> Neural Advisory Strategy Hub
                 </h2>
                 <p className="text-xs text-slate-400">Tailored mitigation workflows automatically compiled by the GROQ Engine ecosystem.</p>
               </div>
-              <button onClick={fetchAllData} className="border border-white/10 hover:bg-white/5 px-3 py-1 text-xs font-mono rounded text-slate-300">
-                REFRESH COGNITIVE MATRIX
-              </button>
-            </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              {recommendations.length > 0 ? recommendations.map((rec) => (
-                <div key={rec.task_key} className="bg-slate-900 border border-white/10 rounded-xl p-6 hover:border-purple-500/30 transition-colors flex flex-col justify-between">
-                  <div>
-                    <div className="flex justify-between items-start mb-4">
-                      <span className="font-mono text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded">[{rec.category}]</span>
-                      <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded ${rec.status === 'Completed' ? 'bg-emerald-500/20 text-emerald-400' : rec.status === 'In-Progress' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-300'}`}>
-                        {rec.status}
-                      </span>
+              {/* CONTROL MATRIX ROW (Now perfectly centered vertically with the title text) */}
+              <div className="flex items-center gap-3 relative font-mono text-xs">
+
+                {/* 1. CUSTOM METRIC DROPDOWN BUTTON */}
+                <div className="relative w-52">
+                  <button
+                    type="button"
+                    onClick={() => { setIsMetricDropdownOpen(!isMetricDropdownOpen); setIsDirDropdownOpen(false); }}
+                    className="bg-slate-900 border border-white/10 hover:border-purple-500/40 text-slate-200 px-4 py-2 rounded font-bold transition-all flex items-center justify-between shadow-lg w-full"
+                  >
+                    <div className="flex items-center gap-2 truncate">
+                      <span className="text-slate-500 text-[10px]">SORT:</span>
+                      <span className="truncate">{metricLabels[sortMetric]}</span>
                     </div>
-                    <h4 className="text-md text-white font-bold mb-2">{rec.title}</h4>
-                    <p className="text-xs text-slate-400 leading-relaxed mb-6">{rec.description}</p>
-                  </div>
-                  <div className="flex gap-2 border-t border-white/5 pt-4">
-                    <button onClick={() => handleUpdateTaskStatus(rec.task_key, "In-Progress")} className="flex-1 py-1 text-xs font-mono border border-amber-400/40 text-amber-400 hover:bg-amber-400/5 rounded transition-all">Start</button>
-                    <button onClick={() => handleUpdateTaskStatus(rec.task_key, "Completed")} className="flex-1 py-1 text-xs font-mono border border-emerald-400/40 text-emerald-400 hover:bg-emerald-400/5 rounded transition-all">Complete</button>
-                  </div>
+                    <span className="material-symbols-outlined text-xs text-slate-500 transition-transform duration-200 shrink-0" style={{ transform: isMetricDropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>expand_more</span>
+                  </button>
+
+                  {isMetricDropdownOpen && (
+                    <div className="absolute inset-x-0 mt-1 bg-slate-900 border border-white/10 rounded shadow-2xl z-50 overflow-hidden backdrop-blur-xl animate-fadeIn">
+                      <button type="button" onClick={() => { setSortMetric('savings'); setIsMetricDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 hover:bg-purple-500/10 hover:text-purple-400 transition-colors ${sortMetric === 'savings' ? 'text-purple-400 bg-purple-500/5 font-bold' : 'text-slate-300'}`}>Monthly Savings</button>
+                      <button type="button" onClick={() => { setSortMetric('reduction'); setIsMetricDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 hover:bg-purple-500/10 hover:text-purple-400 transition-colors ${sortMetric === 'reduction' ? 'text-purple-400 bg-purple-500/5 font-bold' : 'text-slate-300'}`}>Carbon Reduction</button>
+                      <button type="button" onClick={() => { setSortMetric('cost'); setIsMetricDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 hover:bg-purple-500/10 hover:text-purple-400 transition-colors ${sortMetric === 'cost' ? 'text-purple-400 bg-purple-500/5 font-bold' : 'text-slate-300'}`}>Upfront Cost</button>
+                    </div>
+                  )}
                 </div>
-              )) : (
+
+                {/* 2. CUSTOM DIRECTION DROPDOWN BUTTON */}
+                <div className="relative w-42">
+                  <button
+                    type="button"
+                    onClick={() => { setIsDirDropdownOpen(!isDirDropdownOpen); setIsMetricDropdownOpen(false); }}
+                    className="bg-slate-900 border border-white/10 hover:border-purple-500/40 text-slate-200 px-4 py-2 rounded font-bold transition-all flex items-center justify-between shadow-lg w-full"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="text-slate-500 text-[10px]">WAY:</span>
+                      <span>{dirLabels[sortDirection]}</span>
+                    </div>
+                    <span className="material-symbols-outlined text-xs text-slate-500 transition-transform duration-200 shrink-0" style={{ transform: isDirDropdownOpen ? 'rotate(180deg)' : 'rotate(0deg)' }}>expand_more</span>
+                  </button>
+
+                  {isDirDropdownOpen && (
+                    <div className="absolute inset-x-0 mt-1 bg-slate-900 border border-white/10 rounded shadow-2xl z-50 overflow-hidden backdrop-blur-xl animate-fadeIn">
+                      <button type="button" onClick={() => { setSortDirection('desc'); setIsDirDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 hover:bg-purple-500/10 hover:text-purple-400 transition-colors ${sortDirection === 'desc' ? 'text-purple-400 bg-purple-500/5 font-bold' : 'text-slate-300'}`}>Descending ↓</button>
+                      <button type="button" onClick={() => { setSortDirection('asc'); setIsDirDropdownOpen(false); }} className={`w-full text-left px-4 py-2.5 hover:bg-purple-500/10 hover:text-purple-400 transition-colors ${sortDirection === 'asc' ? 'text-purple-400 bg-purple-500/5 font-bold' : 'text-slate-300'}`}>Ascending ↑</button>
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. GENERATION ACTION BUTTON */}
+                <button
+                  type="button"
+                  onClick={handleGenerateRecommendations}
+                  disabled={isGeneratingAI}
+                  className="bg-purple-600 hover:bg-purple-700 disabled:bg-purple-950/50 text-white font-bold px-4 py-2 rounded shadow-md transition-all flex items-center gap-2 whitespace-nowrap h-[34px]"
+                >
+                  <span className="material-symbols-outlined text-sm animate-spin" style={{ display: isGeneratingAI ? 'inline-block' : 'none' }}>sync</span>
+                  {isGeneratingAI ? "COMPILING STRATEGY..." : "GENERATE RECOMMENDATIONS"}
+                </button>
+
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              {recommendations.length > 0 ? (
+                recommendations
+                  .sort((a, b) => {
+                    // Map keys back accurately to dataset item attributes
+                    let valA = sortMetric === 'savings' ? a.estimated_monthly_savings
+                      : sortMetric === 'reduction' ? a.estimated_carbon_reduction_pct
+                        : a.estimated_upfront_cost;
+
+                    let valB = sortMetric === 'savings' ? b.estimated_monthly_savings
+                      : sortMetric === 'reduction' ? b.estimated_carbon_reduction_pct
+                        : b.estimated_upfront_cost;
+
+                    // Fallback default zeroes for clean missing value evaluation loops
+                    valA = valA || 0;
+                    valB = valB || 0;
+
+                    // Return sorting order weight based on active direction toggle selection
+                    return sortDirection === 'desc' ? valB - valA : valA - valB;
+                  })
+                  .map((rec) => (
+                    <div key={rec.task_key} className="bg-slate-900 border border-white/10 rounded-xl p-6 hover:border-purple-500/30 transition-all flex flex-col justify-between min-h-[340px] group">
+                      <div className="flex flex-col flex-grow justify-between mb-4">
+
+                        {/* Top Text Cluster (Category, Title, Description) */}
+                        <div className="mb-4">
+                          <div className="flex justify-between items-start mb-4">
+                            <span className="font-mono text-[10px] bg-purple-500/10 text-purple-400 px-2 py-0.5 rounded">[{rec.category}]</span>
+                            <span className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded ${rec.status === 'In-Progress' ? 'bg-amber-500/20 text-amber-400' : 'bg-slate-800 text-slate-300'}`}>
+                              {rec.status}
+                            </span>
+                          </div>
+
+                          <h4 className="text-md text-white font-bold mb-2 group-hover:text-purple-400 transition-colors">{rec.title}</h4>
+                          <p className="text-xs text-slate-400 leading-relaxed">{rec.description}</p>
+                        </div>
+
+                        {/* Value Indicators Metric Matrix (Now perfectly anchored at the bottom of the content area) */}
+                        <div className="grid grid-cols-3 gap-2 bg-slate-950 p-3 rounded-lg border border-white/5 font-mono text-[11px]">
+                          <div className="text-center">
+                            <span className="block text-[9px] text-slate-500 uppercase">Savings</span>
+                            <span className="text-emerald-400 font-bold">₹{rec.estimated_monthly_savings}/mo</span>
+                          </div>
+                          <div className="text-center border-x border-white/10">
+                            <span className="block text-[9px] text-slate-500 uppercase">Reduction</span>
+                            <span className="text-cyan-400 font-bold">-{rec.estimated_carbon_reduction_pct}%</span>
+                          </div>
+                          <div className="text-center">
+                            <span className="block text-[9px] text-slate-500 uppercase">Capex Cost</span>
+                            <span className="text-amber-400 font-bold">₹{rec.estimated_upfront_cost || "0"}</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Action Footer Buttons (Stays at the very bottom edge of the card) */}
+                      <div className="flex gap-2 border-t border-white/5 pt-4">
+                        {rec.status !== 'In-Progress' && (
+                          <button onClick={() => handleUpdateTaskStatus(rec.task_key, "In-Progress")} className="flex-1 py-1 text-xs font-mono border border-amber-400/40 text-amber-400 hover:bg-amber-400/5 rounded transition-all">Start</button>
+                        )}
+                        <button onClick={() => handleUpdateTaskStatus(rec.task_key, "Completed")} className="flex-1 py-1 text-xs font-mono border border-emerald-400/40 text-emerald-400 hover:bg-emerald-400/5 rounded transition-all">Complete</button>
+                      </div>
+                    </div>
+                  ))
+              ) : (
                 <div className="col-span-3 text-center py-12 bg-slate-900/20 border border-white/10 rounded-xl font-mono text-xs text-slate-500">
-                  Insufficient footprint dataset memory captured to generate real-time execution nodes. Try uploading more log documents.
+                  Click 'Generate Recommendations' above to query the optimization model.
                 </div>
               )}
             </div>
@@ -582,30 +794,104 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
                 <input
                   type="text" placeholder="Full Name" required
                   value={newUser.name} onChange={e => setNewUser({ ...newUser, name: e.target.value })}
-                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400"
+                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400 text-white"
                 />
                 <input
                   type="email" placeholder="Email Identification Anchor" required
                   value={newUser.email} onChange={e => setNewUser({ ...newUser, email: e.target.value })}
-                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400"
+                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400 text-white"
                 />
                 <input
                   type="password" placeholder="System Encryption Secure Key Token" required
                   value={newUser.password} onChange={e => setNewUser({ ...newUser, password: e.target.value })}
-                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400"
+                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400 text-white"
                 />
                 <select
                   value={newUser.role} onChange={e => setNewUser({ ...newUser, role: e.target.value })}
-                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400"
+                  className="bg-slate-950 border border-white/10 rounded px-3 py-2 text-xs font-mono outline-none focus:border-red-400 text-slate-300"
                 >
-                  <option value="Staff">Staff Operator Scope Scope</option>
+                  <option value="Staff">Staff Operator Scope</option>
                   <option value="Auditor">Official Regulatory Auditor</option>
                   <option value="Admin">Full Executive Root Administrator</option>
                 </select>
-                <button type="submit" className="md:col-span-2 mt-2 bg-red-500 text-slate-950 font-bold font-mono text-xs py-2 rounded hover:bg-red-600 transition-colors">
-                  PROVISION CHANNEL LOG
+                <button type="submit" className="md:col-span-2 mt-2 bg-red-500 hover:bg-red-600 text-slate-950 font-bold font-mono text-xs py-2 rounded transition-colors">
+                  PROVISION SECURITY CHANNEL
                 </button>
               </form>
+            </div>
+            {/* USER ACCESS DIRECTORY LEDGER ROSTER */}
+            <div className="bg-slate-900 border border-white/10 rounded-xl overflow-hidden mt-6 font-mono text-xs">
+              <div className="p-4 bg-white/[0.02] border-b border-white/5 text-slate-300 font-bold uppercase tracking-wider">
+                Active Organization Identity Channels
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-950/60 border-b border-white/10 text-slate-400 text-[11px]">
+                      <th className="p-4">Operator Name</th>
+                      <th className="p-4">Email Anchor</th>
+                      <th className="p-4">System Scope Role</th>
+                      <th className="p-4 text-center w-40">System Status</th>
+                      <th className="p-4 text-center w-16">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-white/5 text-slate-200">
+                    {userList.map((user, idx) => (
+                      <tr key={user.email} className="hover:bg-white/[0.01] transition-colors">
+                        <td className="p-4 font-bold text-white">{user.name}</td>
+                        <td className="p-4 text-slate-400">{user.email}</td>
+                        <td className="p-4">
+                          <span className={`px-2 py-0.5 rounded text-[10px] ${user.role === 'Admin' ? 'bg-red-500/10 text-red-400' : user.role === 'Auditor' ? 'bg-sky-500/10 text-sky-400' : 'bg-emerald-500/10 text-emerald-400'}`}>
+                            {user.role}
+                          </span>
+                        </td>
+                        <td className="p-4 text-center relative overflow-visible">
+
+                          {/* CUSTOM STATUS MATCHED DROPDOWN BUTTON */}
+                          <button
+                            type="button"
+                            onClick={() => setActiveStatusDropdown(activeStatusDropdown === idx ? null : idx)}
+                            className={`px-3 py-1 rounded font-bold text-[11px] transition-all flex items-center justify-between gap-2 mx-auto w-28 border ${user.is_active !== false ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-red-500/10 text-red-400 border-red-500/20'}`}
+                          >
+                            <span>{user.is_active !== false ? 'Active' : 'Inactive'}</span>
+                            <span className="material-symbols-outlined text-[12px]">expand_more</span>
+                          </button>
+
+                          {/* DROPDOWN OVERLAY CONTEXT MENU */}
+                          {activeStatusDropdown === idx && (
+                            <div className="absolute left-1/2 -translate-x-1/2 mt-1 w-28 bg-slate-950 border border-white/10 rounded shadow-2xl z-50 overflow-hidden text-left backdrop-blur-xl animate-fadeIn">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleUserStatus(user.email, false)} // set to active (current status false -> sets to true)
+                                className={`w-full px-3 py-2 hover:bg-emerald-500/10 hover:text-emerald-400 text-slate-300 border-b border-white/5 ${user.is_active !== false ? 'text-emerald-400 font-bold bg-emerald-500/5' : ''}`}
+                              >
+                                Active
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleUserStatus(user.email, true)} // set to inactive
+                                className={`w-full px-3 py-2 hover:bg-red-500/10 hover:text-red-400 text-slate-300 ${user.is_active === false ? 'text-red-400 font-bold bg-red-500/5' : ''}`}
+                              >
+                                Inactive
+                              </button>
+                            </div>
+                          )}
+                        </td>
+                        <td className="p-4 text-center">
+                          <button 
+                            type="button"
+                            onClick={() => handleDeleteUser(user.email)}
+                            className="text-slate-500 hover:text-red-400 transition-colors duration-150 p-1 rounded hover:bg-red-500/5 flex items-center justify-center mx-auto"
+                            title="Purge User Channel"
+                          >
+                            <span className="material-symbols-outlined text-base">delete</span>
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         )}
