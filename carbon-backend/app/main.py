@@ -57,7 +57,8 @@ def login_user(payload: UserLogin, db: Database = Depends(get_db)):
         data={
             "sub": user["email"], 
             "tenant_id": str(user["tenant_id"]), 
-            "role": user["role"]}
+            "role": user["role"]
+        }
     )
 
     return {
@@ -196,74 +197,6 @@ def get_dashboard_analytics(tenant_id: str, db: Database = Depends(get_db), curr
     }
 
 # --- AI RECOMMANDATION SYSTEM ---
-# @app.get("/api/v1/advisor/recommendations", tags=["AI Recommendation System"])
-# def get_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
-#     """
-#     Reads active carbon logs, filters out already completed database tasks,
-#     and calls GROQ to generate custom, non-generic operational fixes.
-#     """
-
-#     if tenant_id != str(current_user["tenant_id"]):
-#         raise HTTPException(status_code=403, detail="Unauthorized dataset view request.")
-
-#     # 1. Fetch company records to build the AI's context
-#     tenant = db.tenants.find_one({"_id": tenant_id})
-#     logs = list(db.carbon_logs.find({"tenant_id": tenant_id}))
-    
-#     if not tenant or not logs:
-#         raise HTTPException(status_code=404, detail="Insufficient company history to analyze")
-
-#     # Summarize current emissions for the prompt context string
-#     total_tons = sum(log["calculated_emissions"]["co2e_metric_tons"] for log in logs)
-    
-#     # 2. CORE SYSTEM MEMORY: Fetch completed or in-progress entries to block duplication
-#     existing_tasks = list(db.ai_recommendations.find({"tenant_id": tenant_id}))
-#     completed_titles = [task["title"] for task in existing_tasks if task["status"] == "Completed"]
-
-#     # 3. Craft the structural System Prompt boundary rules
-#     system_instruction = (
-#         f"You are an expert energy auditor specializing in MSME sustainability for the {tenant['industry_sector']} sector. "
-#         f"The company has a lifetime carbon footprint of {total_tons} metric tons of CO2e. "
-#         f"CRITICAL: Do NOT suggest any of the following projects as they have already been fully implemented: {completed_titles}. "
-#         "Provide exactly 2 new, low-cost operational recommendations. "
-#         "You MUST respond ONLY with a raw JSON list, matching this exact structure: "
-#         '[{"task_key": "unique_slug", "title": "Actionable Title", "estimated_upfront_cost": 5000, "estimated_monthly_savings": 1200, "estimated_carbon_reduction_pct": 4.5}]'
-#     )
-
-#     # 4. Fire the request payload over to the GROQ Infrastructure
-#     headers = {
-#         "Authorization": f"Bearer {settings.GROQ_API_KEY}",
-#         "Content-Type": "application/json"
-#     }
-    
-#     groq_payload = {
-#         "model": settings.GROQ_API_MODEL,  # Default Model to use: openai/gpt-oss-120b; Fast, highly performant LLM
-#         "messages": [
-#             {"role": "system", "content": system_instruction},
-#             {"role": "user", "content": "Analyze our facility operations and generate our new tasks matrix."}
-#         ],
-#         "temperature": 0.2, # Keeps the JSON output predictable and stable
-#         "response_format": {"type": "json_object"}
-#     }
-
-#     try:
-#         response = requests.post(
-#             "https://api.groq.com/openai/v1/chat/completions",
-#             headers=headers,
-#             json=groq_payload,
-#             timeout=10.0
-#         )
-#         response_json = response.aggregate_data_results() if hasattr(response, 'aggregate_data_results') else response.json()
-#         print(response.status_code)
-#         print(response.json())
-#         raw_ai_text = response_json["choices"][0]["message"]["content"]
-        
-#         # Return the clean structured output straight to our frontend page component
-#         return {"tenant_id": tenant_id, "recommendations": raw_ai_text}
-        
-#     except Exception as e:
-#         raise HTTPException(status_code=500, detail=f"AI Bridge Timeout: {str(e)}")
-
 @app.get("/api/v1/advisor/recommendations", tags=["AI Recommendation System"])
 def get_ai_recommendations(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
     """
@@ -505,7 +438,7 @@ async def parse_uploaded_bill(file: UploadFile = File(...), current_user: dict =
 
 # --- Audit View Route ---
 @app.get("/api/v1/audit/ledger", tags=["Audit & Compliance"])
-def get_audit_trail_ledger(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Auditor"]))):
+def get_audit_trail_ledger(tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Auditor", "Staff"]))):
     """
     Returns a completely flat, transparent ledger array matching historical input metrics 
     directly to their calculation constants and official regulatory data citations.
@@ -568,4 +501,3 @@ def simulate_reduction(tenant_id: str, target_month: str, reduction_pct: float, 
         "net_carbon_saved_tons": round(simulated_savings, 4),
         "reduction_applied": f"{reduction_pct}%"
     }
-
