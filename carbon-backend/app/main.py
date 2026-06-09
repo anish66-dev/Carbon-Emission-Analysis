@@ -626,3 +626,25 @@ def admin_delete_user(user_email: str, db: Database = Depends(get_db), current_u
         raise HTTPException(status_code=404, detail="Target user profile could not be found within your network pool.")
 
     return {"status": "Success", "message": f"User account {email_clean} wiped from organizational core database structures."}
+
+@app.delete("/api/v1/logs", tags=["Carbon Engine"])
+def delete_emission_log(billing_period: str, category: str, calculated_output_tons: float, tenant_id: str, db: Database = Depends(get_db), current_user: dict = Depends(RoleChecker(["Admin", "Staff"]))):
+    """
+    Safely finds and purges a targeted utility log matching the precise 
+    metrics configuration parameters inside the tenant sandbox.
+    """
+    if tenant_id != str(current_user["tenant_id"]):
+        raise HTTPException(status_code=403, detail="Cross-tenant mutation violation blocked.")
+
+    # Locate and destroy the matching transaction document log entry
+    result = db.carbon_logs.delete_one({
+        "tenant_id": tenant_id,
+        "billing_period": billing_period,
+        "category": category,
+        "calculated_emissions.co2e_metric_tons": calculated_output_tons
+    })
+
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Target transaction ledger record not found.")
+
+    return {"status": "Success", "message": "Log entry cleanly evicted from immutable database tracking grid."}

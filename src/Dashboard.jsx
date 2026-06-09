@@ -32,6 +32,22 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
     desc: 'Descending ↓'
   };
 
+  const [isFormModalOpen, setIsFormModalOpen] = useState(false);
+  const [formData, setFormData] = useState({
+    billing_period: '',
+    category: 'Electricity', // Default fallback value
+    raw_value: '',
+    unit: 'kWh',
+    cost: ''
+  });
+
+  useEffect(() => {
+    if (formData.category === 'Electricity') {
+      setFormData(prev => ({ ...prev, unit: 'kWh' }));
+    } else if (formData.category === 'Diesel' || formData.category === 'Petrol') {
+      setFormData(prev => ({ ...prev, unit: 'Liters' }));
+    }
+  }, [formData.category]);
 
   const [isGeneratingAI, setIsGeneratingAI] = useState(false);
 
@@ -128,48 +144,126 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
     if (!file) return;
     setIsUploading(true);
     setUploadStatus("PROCESSING_NEURAL_ENGINE...");
-    const formData = new FormData();
-    formData.append("file", file);
+    const dataPayload = new FormData();
+    dataPayload.append("file", file);
 
     try {
       const parseResponse = await axios.post(
         "http://127.0.0.1:8000/api/v1/logs/parse-bill",
-        formData,
+        dataPayload,
         { headers: { ...getAuthHeaders().headers, "Content-Type": "multipart/form-data" } }
       );
 
       if (parseResponse.data.status === "Success") {
         const extracted = parseResponse.data.pre_fill_data;
-        setUploadStatus("VERIFICATION_REQUIRED");
 
-        const userConfirms = window.confirm(
-          `[AI EXTRACTION COMPLETE]\n\nCategory: ${extracted.category}\nAmount: ${extracted.input_data.raw_value} ${extracted.input_data.unit}\nPeriod: ${extracted.billing_period}\nCost: ₹${extracted.input_data.cost}\n\nCommit this data to the immutable ledger?`
-        );
+        // Load AI extracted fields cleanly into local editable fields
+        setFormData({
+          billing_period: extracted.billing_period || '',
+          category: extracted.category || 'Electricity',
+          raw_value: extracted.input_data?.raw_value || '',
+          unit: extracted.input_data?.unit || 'kWh',
+          cost: extracted.input_data?.cost || ''
+        });
 
-        if (userConfirms) {
-          setUploadStatus("COMMITTING_TO_LEDGER...");
-          await axios.post("http://127.0.0.1:8000/api/v1/logs", {
-            tenant_id: tenantId,
-            facility_id: "FAC-HQ-01",
-            billing_period: extracted.billing_period,
-            scope: extracted.category === "Electricity" ? 2 : 1,
-            category: extracted.category,
-            input_data: extracted.input_data
-          }, getAuthHeaders());
-
-          setUploadStatus("SYNC_COMPLETE");
-          fetchAllData();
-          setAutoScrollLogs(true);
-        } else {
-          setUploadStatus("UPLOAD_ABORTED");
-        }
+        setUploadStatus("READY_FOR_UPLOAD");
+        setIsFormModalOpen(true); // Fire open the review dashboard form modal node
       }
     } catch (error) {
       console.error("Ingestion crash:", error);
       setUploadStatus("PROCESSING_FAILED");
-    } finally {
       setTimeout(() => setUploadStatus("READY_FOR_UPLOAD"), 3000);
+    } finally {
       setIsUploading(false);
+    }
+  };
+
+  const handleFormSubmit = async (e) => {
+    e.preventDefault();
+    setUploadStatus("COMMITTING_TO_LEDGER...");
+
+    const newLogInput = {
+      billing_period: formData.billing_period,
+      category: formData.category,
+      user_input_value: parseFloat(formData.raw_value),
+      unit: formData.unit,
+      applied_coefficient: formData.category === "Electricity" ? "Regional Grid Coeff" : "Fuel Coeff Standard",
+      regulatory_source_citation: "Awaiting Live Ledger Sync Refresh Authority"
+    };
+
+    try {
+      const res = await axios.post("http://127.0.0.1:8000/api/v1/logs", {
+        tenant_id: tenantId,
+        facility_id: "FAC-HQ-01",
+        billing_period: formData.billing_period,
+        scope: formData.category === "Electricity" ? 2 : 1,
+        category: formData.category,
+        input_data: {
+          raw_value: newLogInput.user_input_value,
+          unit: formData.unit,
+          cost: parseFloat(formData.cost)
+        }
+      }, getAuthHeaders());
+
+      const backendCalculatedTons = res.data.co2e_metric_tons;
+      newLogInput.calculated_output_tons = backendCalculatedTons;
+
+      // 1. OPTIMISTIC STATE UPDATE A: Push to master logs state and enforce chronological order
+      setLogs(prevLogs => {
+        const updatedLogs = [newLogInput, ...prevLogs];
+        // Keep master data array explicitly sorted from oldest date to newest date
+        return updatedLogs.sort((a, b) => a.billing_period.localeCompare(b.billing_period));
+      });
+
+      // 2. OPTIMISTIC STATE UPDATE B: Update Recharts timeline graph state
+      setDashboardData(prevData => {
+        let updatedChartData;
+        const scopeKey = formData.category === "Electricity" ? "scope_2" : "scope_1";
+        const nodeExists = prevData.chart_data.some(item => item.month === newLogInput.billing_period);
+
+        if (nodeExists) {
+          updatedChartData = prevData.chart_data.map(item => {
+            if (item.month === newLogInput.billing_period) {
+              return {
+                ...item,
+                [scopeKey]: parseFloat((item[scopeKey] + backendCalculatedTons).toFixed(4))
+              };
+            }
+            return item;
+          });
+        } else {
+          updatedChartData = [
+            ...prevData.chart_data,
+            {
+              month: newLogInput.billing_period,
+              scope_1: scopeKey === "scope_1" ? backendCalculatedTons : 0,
+              scope_2: scopeKey === "scope_2" ? backendCalculatedTons : 0
+            }
+          ];
+          updatedChartData.sort((a, b) => a.month.localeCompare(b.month));
+        }
+
+        const updatedLifetimeTons = parseFloat((prevData.intensity_metrics.total_lifetime_emissions_tons + backendCalculatedTons).toFixed(4));
+
+        return {
+          ...prevData,
+          intensity_metrics: {
+            ...prevData.intensity_metrics,
+            total_lifetime_emissions_tons: updatedLifetimeTons
+          },
+          chart_data: updatedChartData
+        };
+      });
+
+      setIsFormModalOpen(false);
+      setFormData({ billing_period: '', category: 'Electricity', raw_value: '', unit: 'kWh', cost: '' });
+      setAutoScrollLogs(true);
+
+    } catch (err) {
+      console.error("Ledger write failure:", err);
+      alert(err.response?.data?.detail || "Failed to commit log metrics data.");
+    } finally {
+      setUploadStatus("READY_FOR_UPLOAD");
     }
   };
 
@@ -220,14 +314,57 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
 
   // Delete Log Action (Staff & Admin Only)
   const handleDeleteLog = async (logItem) => {
-    if (userRole === 'Auditor') return;
-    const confirmDelete = window.confirm(`CRITICAL WARNING: Are you sure you want to purge this record from active analytics?\nPeriod: ${logItem.billing_period} | Yield: ${logItem.calculated_output_tons} Tons`);
-    if (!confirmDelete) return;
+  if (userRole === 'Auditor') return;
+  
+  const confirmDelete = window.confirm(
+    `CRITICAL WARNING: Are you sure you want to purge this record from active analytics?\nPeriod: ${logItem.billing_period} | Yield: ${logItem.calculated_output_tons} Tons`
+  );
+  if (!confirmDelete) return;
 
-    // IMPLEMENTATION NOTE: Bind this logic to your Backend Delete API endpoint
-    alert("Backend Log Eviction Hook Triggered successfully. Re-syncing tracking matrix.");
+  const substractedTons = logItem.calculated_output_tons || 0;
+  const targetPeriod = logItem.billing_period;
+  const targetScopeKey = logItem.category === "Electricity" ? "scope_2" : "scope_1";
+
+  // 1. OPTIMISTIC UPDATE: Evict locally instantly for peak performance responsiveness
+  setLogs(prevLogs => prevLogs.filter(item => item !== logItem));
+
+  setDashboardData(prevData => {
+    const updatedChartData = prevData.chart_data.map(node => {
+      if (node.month === targetPeriod) {
+        return {
+          ...node,
+          [targetScopeKey]: Math.max(0, parseFloat((node[targetScopeKey] - substractedTons).toFixed(4)))
+        };
+      }
+      return node;
+    }).filter(node => (node.scope_1 + node.scope_2) > 0);
+
+    const updatedLifetimeTons = Math.max(0, parseFloat((prevData.intensity_metrics.total_lifetime_emissions_tons - substractedTons).toFixed(4)));
+
+    return {
+      ...prevData,
+      intensity_metrics: {
+        ...prevData.intensity_metrics,
+        total_lifetime_emissions_tons: updatedLifetimeTons
+      },
+      chart_data: updatedChartData
+    };
+  });
+
+  // 2. FIXED: UNCOMMENTED & ACTIVATED BACKGROUND RETRIEVAL DB SYNC HOOK
+  try {
+    await axios.delete(
+      `http://127.0.0.1:8000/api/v1/logs?tenant_id=${tenantId}&billing_period=${logItem.billing_period}&category=${logItem.category}&calculated_output_tons=${logItem.calculated_output_tons}`, 
+      getAuthHeaders()
+    );
+    console.log("Database core cluster synced completely.");
+  } catch (error) {
+    console.error("Backend eviction drop crash, running complete rollback recovery loop:", error);
+    alert("Database sync failed. Reverting data array to baseline.");
+    // Rollback recovery step: pull fresh data if server communication breaks down
     fetchAllData();
-  };
+  }
+};
 
   const [userList, setUserList] = useState([]);
   const [activeStatusDropdown, setActiveStatusDropdown] = useState(null); // Tracks open dropdown row index
@@ -279,20 +416,20 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
   };
 
   const handleDeleteUser = async (userEmail) => {
-  const confirmUserWipe = window.confirm(`CRITICAL SYSTEM ACTION: Are you sure you want to permanently delete user [ ${userEmail} ]?\nThis action cannot be undone.`);
-  if (!confirmUserWipe) return;
+    const confirmUserWipe = window.confirm(`CRITICAL SYSTEM ACTION: Are you sure you want to permanently delete user [ ${userEmail} ]?\nThis action cannot be undone.`);
+    if (!confirmUserWipe) return;
 
-  try {
-    const res = await axios.delete(`http://127.0.0.1:8000/api/v1/admin/users/${userEmail}`, getAuthHeaders());
-    alert(res.data.message || "User successfully evicted from active directory.");
-    
-    // Refresh the user roster grid immediately to mirror deletion changes
-    fetchUsers();
-  } catch (err) {
-    const errorMsg = err.response?.data?.detail || "Eviction routine failed.";
-    alert(errorMsg);
-  }
-};
+    try {
+      const res = await axios.delete(`http://127.0.0.1:8000/api/v1/admin/users/${userEmail}`, getAuthHeaders());
+      alert(res.data.message || "User successfully evicted from active directory.");
+
+      // Refresh the user roster grid immediately to mirror deletion changes
+      fetchUsers();
+    } catch (err) {
+      const errorMsg = err.response?.data?.detail || "Eviction routine failed.";
+      alert(errorMsg);
+    }
+  };
 
   const handleToggleUserStatus = async (userEmail, currentStatus) => {
     const nextStatus = !currentStatus;
@@ -405,24 +542,33 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
 
             {/* Bottom Row Interactivity (Conditional on security context permissions) */}
             <div className="grid grid-cols-1 md:grid-cols-12 gap-6">
+              {/* Document Dropzone - Smart Ingestion Component */}
+              {userRole !== 'Auditor' && (
+                <div className="md:col-span-5 bg-slate-900/60 border border-white/10 rounded-xl p-6 h-[340px] flex flex-col justify-between">
+                  <div className="flex justify-between items-start">
+                    <div>
+                      <h3 className="text-xs font-mono text-slate-400 uppercase mb-1">Smart Document Ingestion</h3>
+                      <p className="text-xs text-slate-400">Upload utility invoices or fuel records directly to parse fields dynamically.</p>
+                    </div>
 
-              {/* Document Dropzone - Hidden entirely from Auditor accounts */}
-              {userRole !== 'Auditor' ? (
-                <div className="md:col-span-5 bg-slate-900/60 border border-white/10 rounded-xl p-6 h-[340px] flex flex-col">
-                  <div>
-                    <h3 className="text-xs font-mono text-slate-400 uppercase mb-1">Smart Document Ingestion</h3>
-                    <p className="text-xs text-slate-400 mb-4">Upload utility invoices or fuel records directly to parse fields dynamically.</p>
+                    {/* ADDED: High-visibility Yellow manual logging route navigation macro button */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setFormData({ billing_period: '', category: 'Electricity', raw_value: '', unit: 'kWh', cost: '' }); // Clear any stale pre-fills
+                        setIsFormModalOpen(true);
+                      }}
+                      className="bg-[#ffb35d] hover:bg-[#e09b4c] text-slate-950 font-mono font-bold text-[10px] px-2.5 py-1 rounded transition-colors uppercase shrink-0 tracking-wider shadow-md"
+                    >
+                      Enter Manually
+                    </button>
                   </div>
+
                   <input type="file" ref={fileInputRef} onChange={(e) => handleFileUpload(e.target.files[0])} className="hidden" accept=".pdf,.png,.jpg,.jpeg" />
-                  <div onClick={() => fileInputRef.current?.click()} className={`flex-grow border border-dashed rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all bg-white/[0.02] ${isUploading ? 'border-emerald-400 bg-emerald-400/5 animate-pulse' : 'border-white/10 hover:border-emerald-500/40'}`}>
+                  <div onClick={() => fileInputRef.current?.click()} className={`flex-grow border border-dashed rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all bg-white/[0.02] mt-3 ${isUploading ? 'border-emerald-400 bg-emerald-400/5 animate-pulse' : 'border-white/10 hover:border-emerald-500/40'}`}>
                     <span className="material-symbols-outlined text-3xl text-slate-500 mb-2">upload_file</span>
                     <span className="font-mono text-xs text-white">{uploadStatus}</span>
                   </div>
-                </div>
-              ) : (
-                <div className="md:col-span-5 bg-slate-900/20 border border-white/5 border-dashed rounded-xl p-6 h-[340px] flex flex-col items-center justify-center text-center">
-                  <span className="material-symbols-outlined text-4xl text-slate-600 mb-2">lock</span>
-                  <p className="text-xs font-mono text-slate-500 max-w-xs">Document submission node locked. Accounts assigned to standard Audit roles do not maintain write access.</p>
                 </div>
               )}
 
@@ -432,28 +578,23 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
                   <h3 className="text-xs font-mono text-slate-400 uppercase">Live Telemetry Ledger Trail</h3>
                   <span className="text-[10px] font-mono text-emerald-400">[ RUNNING_FEED ]</span>
                 </div>
-                <div
-                  ref={logFeedRef}
-                  onWheel={() => setAutoScrollLogs(false)}
-                  className="flex-grow overflow-y-auto space-y-3 font-mono text-xs"
-                >
-                  {logs.length === 0 ? <span className="text-slate-500">No transactions caught in registry loop.</span> :
-                    logs.slice(0, 10).map((log, idx) => (
-                      <div key={idx} className="flex justify-between items-center bg-white/[0.02] border border-white/5 rounded p-2 hover:bg-white/[0.04]">
+                <div className="flex-grow overflow-y-auto space-y-3 font-mono text-xs">
+                  {logs.length === 0 ? (
+                    <span className="text-slate-500">No transactions caught in registry loop.</span>
+                  ) : (
+                    // FIXED: Changed slice boundary from 10 to 5 to strictly display the 5 latest records
+                    logs.slice(-5).reverse().map((log, idx) => (
+                      <div key={idx} className="flex justify-between items-center bg-white/[0.02] border border-white/5 rounded p-2 hover:bg-white/[0.04] animate-fadeIn">
                         <div className="flex gap-4">
                           <span className="text-slate-500">{log.billing_period}</span>
                           <span className="text-white">{log.category} ➔ {log.user_input_value} {log.unit}</span>
                         </div>
                         <div className="flex items-center gap-3">
                           <span className="text-emerald-400 font-bold">+{log.calculated_output_tons?.toFixed(2)} T</span>
-                          {userRole !== 'Auditor' && (
-                            <button onClick={() => handleDeleteLog(log)} className="text-slate-500 hover:text-red-400 transition-colors">
-                              <span className="material-symbols-outlined text-sm">delete</span>
-                            </button>
-                          )}
                         </div>
                       </div>
-                    ))}
+                    ))
+                  )}
                 </div>
               </div>
 
@@ -878,7 +1019,7 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
                           )}
                         </td>
                         <td className="p-4 text-center">
-                          <button 
+                          <button
                             type="button"
                             onClick={() => handleDeleteUser(user.email)}
                             className="text-slate-500 hover:text-red-400 transition-colors duration-150 p-1 rounded hover:bg-red-500/5 flex items-center justify-center mx-auto"
@@ -931,6 +1072,103 @@ export default function ExecutiveDashboard({ sessionCtx, onLogout }) {
           <button onClick={executeTerminalShutdown} className="p-2 text-red-400/60 hover:text-red-400 transition-all hover:scale-105" title="Terminate Operational Session"><span className="material-symbols-outlined text-base">power_settings_new</span></button>
         </div>
       </nav>
+      {/* DYNAMIC MODAL INGESTION EDIT & VALIDATION FORM EDGE */}
+      {isFormModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 font-mono text-xs">
+          <div className="bg-slate-900 border border-white/10 w-full max-w-md rounded-xl shadow-2xl p-6 animate-fadeIn">
+
+            <div className="flex justify-between items-center border-b border-white/5 pb-3 mb-4">
+              <h3 className="text-sm font-bold text-white uppercase flex items-center gap-2">
+                <span className="material-symbols-outlined text-emerald-400 text-base">fact_check</span>
+                {formData.raw_value ? "Verify Extracted Data Metrics" : "Manual Carbon Ledger Logging"}
+              </h3>
+              <button type="button" onClick={() => setIsFormModalOpen(false)} className="text-slate-400 hover:text-red-400 transition-colors">
+                <span className="material-symbols-outlined text-base">close</span>
+              </button>
+            </div>
+
+            <form onSubmit={handleFormSubmit} className="space-y-4">
+
+              {/* Category selector option drops */}
+              <div>
+                <label className="block text-[10px] uppercase text-slate-400 mb-1.5">Resource Stream Category</label>
+                <select
+                  value={formData.category}
+                  onChange={e => setFormData({ ...formData, category: e.target.value })}
+                  className="w-full bg-slate-950 border border-white/10 rounded px-3 py-2 text-white outline-none focus:border-emerald-500 text-xs"
+                  required
+                >
+                  <option value="Electricity">Electricity (Scope 2)</option>
+                  <option value="Diesel">Diesel Fuel Consumption (Scope 1)</option>
+                  <option value="Petrol">Petrol/Gasoline Combustion (Scope 1)</option>
+                </select>
+              </div>
+
+              {/* Billing period field layout block */}
+              <div>
+                <label className="block text-[10px] uppercase text-slate-400 mb-1.5">Target Billing Period (YYYY-MM)</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 2026-05"
+                  pattern="^\d{4}-(0[1-9]|1[0-2])$"
+                  title="Format must match YYYY-MM explicitly"
+                  value={formData.billing_period}
+                  onChange={e => setFormData({ ...formData, billing_period: e.target.value })}
+                  className="w-full bg-slate-950 border border-white/10 rounded px-3 py-2 text-white outline-none focus:border-emerald-500 text-xs"
+                  required
+                />
+              </div>
+
+              {/* Consumption quantities block splits */}
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1.5">Quantity ({formData.unit})</label>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="Total usage volume"
+                    value={formData.raw_value}
+                    onChange={e => setFormData({ ...formData, raw_value: e.target.value })}
+                    className="w-full bg-slate-950 border border-white/10 rounded px-3 py-2 text-white outline-none focus:border-emerald-500 text-xs"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[10px] uppercase text-slate-400 mb-1.5">Financial Cost (₹)</label>
+                  <input
+                    type="number"
+                    step="any"
+                    placeholder="Total invoice charge"
+                    value={formData.cost}
+                    onChange={e => setFormData({ ...formData, cost: e.target.value })}
+                    className="w-full bg-slate-950 border border-white/10 rounded px-3 py-2 text-white outline-none focus:border-emerald-500 text-xs"
+                    required
+                  />
+                </div>
+              </div>
+
+              {/* Modal footer interactive action buttons */}
+              <div className="flex gap-2 pt-2 border-t border-white/5 mt-6">
+                <button
+                  type="button"
+                  onClick={() => setIsFormModalOpen(false)}
+                  className="flex-1 bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold py-2 rounded transition-colors text-xs"
+                >
+                  CANCEL
+                </button>
+                <button
+                  type="submit"
+                  className="flex-1 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold py-2 rounded transition-colors text-xs"
+                >
+                  COMMIT TO LEDGER
+                </button>
+              </div>
+
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
